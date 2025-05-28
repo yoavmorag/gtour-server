@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+google-generativeai
+# If you have a local resources module, it does not need to be listed.
+# Add any other dependencies your resources.py or other files require.
