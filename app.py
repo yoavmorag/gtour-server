@@ -69,10 +69,7 @@ async def post_tour(request: Request, background_tasks: BackgroundTasks):
 
         # Convert the points data to resources.Point objects
         points = [resources.Point(**point) for point in points_data]
-        audio_output_dir = os.path.join(
-            os.environ.get('BUILD_WORKSPACE_DIRECTORY', '.'),
-            'experimental/migrationcenter/Hackathon_2025/gtours/audio_out',
-        )
+        audio_output_dir = './data'
 
         tour = resources.Tour(
             tour_id=tour_id,
