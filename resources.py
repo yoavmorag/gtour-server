@@ -12,9 +12,9 @@ class Point:
 
   def __init__(
       self,
-      location: str,
-      longitude: Union[float, int],
-      latitude: Union[float, int],
+      name: str,
+      lng: Union[float, int],
+      lat: Union[float, int],
       visited: bool = False,
       ready: bool = False,
       info: str = "",
@@ -23,17 +23,17 @@ class Point:
     """Initializes a Point object.
 
     Args:
-        location: The name or description of the location.
-        longitude: The longitude of the point.
-        latitude: The latitude of the point.
+        name: The name or description of the location.
+        lng: The longitude of the point.
+        lat: The latitude of the point.
         visited: A boolean indicating if the point has been visited.
         ready: A boolean indicating if the point is ready for interaction.
         audio_path: The file system path to an associated audio file.
         info: General information or notes about the point.
     """
-    self.location: str = location
-    self.longitude: Union[float, int] = longitude
-    self.latitude: Union[float, int] = latitude
+    self.name: str = name
+    self.lng: Union[float, int] = lng
+    self.lat: Union[float, int] = lat
     self.visited: bool = visited
     self.ready: bool = ready
     self.audio_path: str = audio_path
@@ -41,9 +41,9 @@ class Point:
     
   def to_dict(self):
         return {
-            "location": self.location,
-            "longitude": self.longitude,
-            "latitude": self.latitude,
+            "name": self.name,
+            "lng": self.lng,
+            "lat": self.lat,
             "visited": self.visited,
             "ready": self.ready,
             "audio_path": self.audio_path,
@@ -52,9 +52,9 @@ class Point:
 
   def __repr__(self) -> str:
     """Returns a string representation of the Point object."""
-    return (  # Truncate info for brevity
-        f"Point(location='{self.location}', "
-        f"longitude={self.longitude}, latitude={self.latitude}, "
+    return (
+        f"Point(name='{self.name}', "
+        f"lng={self.lng}, lat={self.lat}, "
         f"visited={self.visited}, ready={self.ready}, "
         f"audio_path='{self.audio_path}', info='{self.info[:30]}...')"
     )
@@ -326,7 +326,7 @@ def create_tour_guide_prompt(
 
   prompt = f"""
 You are an expert tour guide AI. Your task is to generate a transcription of a tour guide's speech for a specific **{location}**.
-**IMPORTANT CONTEXT:** The end-user listening to this tour is **physically present** at the **{{location}}**, having arrived based on its geographical coordinates (latitude/longitude). Your narration must reflect this immediacy and be grounded in observable reality.
+**IMPORTANT CONTEXT:** The end-user listening to this tour is **physically present** at the **{{location}}**, having arrived based on its geographical coordinates. Your narration must reflect this immediacy and be grounded in observable reality.
 
 This location is part of a larger tour, and its position is **{tour_position_val}**. You will also be provided with a list of places visited before the current one. The transcription must include descriptions of *how* the tour guide delivers their lines, formatted as a descriptive phrase followed by a colon before the dialogue.
 
