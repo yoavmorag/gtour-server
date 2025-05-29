@@ -8,6 +8,8 @@ import uuid
 from typing import Any, Dict, List, Optional
 import shelve
 from contextlib import contextmanager
+import uuid
+
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
@@ -43,7 +45,7 @@ def get_db():
     with shelve.open(DB_PATH) as db:
         yield db
 
-async def process_tour_background(tour):
+async def process_tour_background(tour: resources.Tour):
     tour_id = tour.tour_id
     try:
         print(f"Background processing started for tour_id: {tour_id}")
@@ -54,7 +56,7 @@ async def process_tour_background(tour):
     except Exception as e:
         print(f"Error during background tour processing for tour_id {tour_id}: {e}")
 
-def run_background_processing(tour):
+def run_tour_background_processing(tour: resources.Tour):
     try:
         asyncio.run(process_tour_background(tour))
     except Exception as e:
@@ -123,6 +125,65 @@ async def get_tour(tour_id: str):
     }
     print(f'Tour data: {tour_data}')
     return JSONResponse(content=tour_data, headers={'Access-Control-Allow-Origin': '*'})
+
+def run_followup_background_processing(tour: resources.Tour, point: resources.Point, followup_id: str):
+    try:
+        asyncio.run(resources._generate_follow_up(client, tour, point, followup_id))
+    except Exception as e:
+        print(f"Exception in run_background_processing for tour {tour.tour_id}: {e}")
+
+@app.post("/tour/{tour_id}/point/{point_name}") # Changed to app.post
+async def post_point_question(
+    tour_id: str,
+    point_name: str,
+    request: Request,
+    background_tasks: BackgroundTasks
+):
+    """
+    Retrieves details for a specific point within a tour,
+    accepts a user's question, and initiates background processing.
+    """
+    tour = database.get(tour_id) #
+    if not tour:
+        raise HTTPException(status_code=404, detail=f"Tour with ID '{tour_id}' not found")
+
+    found_point: resources.Point | None = None
+    # Adjust this logic based on your Tour and Point data structure
+    if hasattr(tour, 'points') and isinstance(tour.points, list):
+        for point in tour.points:
+            if hasattr(point, 'name') and point.name == point_name:
+                found_point = point
+                break
+    # Add other options for finding the point if necessary
+
+    if not found_point:
+        raise HTTPException(status_code=404, detail=f"Point with name '{point_name}' not found in tour '{tour_id}'")
+
+    request_body = await request.json()
+    question: str = request_body.get('question', '')
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+    
+    followup_id = str(uuid.uuid4())
+    found_point.add_follow_up(id=followup_id, question=question)
+
+
+    background_tasks.add_task(
+        run_followup_background_processing,
+        tour_id,
+        found_point,
+        followup_id
+    ) #
+    print(f"Enqueued background task for point '{point_name}' in tour '{tour_id}' with question: '{question[:50]}...'")
+
+    # The response can be the point details, or a confirmation message,
+    # or a combination. Here, we return the point details along with the question received.
+    return {
+        "point_details": found_point,
+        "question_received": question,
+        "followup_id": followup_id,
+        "message": "Question received and background processing initiated."
+    }
 
 @app.get("/tour")
 async def get_all_tours():

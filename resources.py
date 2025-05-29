@@ -1,11 +1,21 @@
 import asyncio
 import os
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Dict
 import wave
 
 from google import genai
 from google.genai import types
+import uuid
 
+
+class PointFollowUp:
+  """Represents a follow-up question and answer for a point of interest."""
+  def __init__(self):
+    self,
+    self.id: str = ""
+    self.question: str = ""
+    self.answer: str = ""
+    self.audio_path: str = ""
 
 class Point:
   """Represents a geographical point of interest with associated information."""
@@ -38,6 +48,20 @@ class Point:
     self.ready: bool = ready
     self.audio_path: str = audio_path
     self.info: str = info
+    # TODO: Add lock handling
+    self.follow_up_questions: Optional[List[PointFollowUp]] = []
+
+  def add_follow_up(self, id: str, question: str) -> None:
+    if not self.follow_up_questions:
+      self.follow_up_questions = []
+    follow_up = PointFollowUp(id = id, question = question)
+    self.follow_up_questions.append(follow_up)
+
+  def followup_index(self, id: str) -> int:
+    for i, follow_up in enumerate(self.follow_up_questions):
+      if follow_up.id == id:
+        return i
+    return -1
     
   def to_dict(self):
         return {
@@ -60,7 +84,6 @@ class Point:
     )
 
   """Represents a tour, which is a collection of points and has an ID."""
-
 
 class Tour:
 
@@ -364,6 +387,96 @@ Now, await the user's input.
 """
   return prompt.strip()
 
+async def _generate_follow_up(client: genai.client.AsyncClient, tour: Tour, point: Point, followup_id: str):
+  index = point.followup_index(followup_id)
+  if index == -1:
+    raise ValueError(f"Follow-up with id {followup_id} not found")
+  pfu = point.follow_up_questions[index]
+  prompt = create_follow_up_prompt(point=point, follow_up_question=pfu.follow_up_question, point_info=point.info, tour_guide_personality=tour.tour_guide_personality, user_prefrences=tour.user_preferences)
+  text_gen_config = types.GenerateContentConfig(
+        temperature=1.5,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
+  text_model = "models/gemini-2.5-flash-preview-04-17-thinking"
+  text_response = await client.models.generate_content(
+      model=text_model,
+      contents=[
+          types.Content(
+              role="user", parts=[types.Part(text=prompt)]
+          )
+      ],
+      config=text_gen_config,
+  )
+  answer = ""
+  if text_response.candidates and text_response.candidates[0].content.parts:
+    answer = text_response.candidates[0].content.parts[0].text
+  pfu.answer = answer
+
+  chosen_voice_name = "Charon"
+  tts_model = "models/gemini-2.5-flash-preview-tts"
+  tts_input_text = (
+        "Please narrate answer the following question as a tour guide. Embody a"
+        f" {tour.tour_guide_personality} style. Speak clearly and at a"
+        f" moderate pace: {answer}"
+  )
+
+  audio_response = await client.models.generate_content(
+      model=tts_model,
+      contents=[
+          types.Content(role="user", parts=[types.Part(text=tts_input_text)])
+      ],
+      config=types.GenerateContentConfig(
+          response_modalities=["AUDIO"],
+          speech_config=types.SpeechConfig(
+              voice_config=types.VoiceConfig(
+                  prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                      voice_name=chosen_voice_name,
+                  )
+              )
+          ),
+      ),
+  )
+  audio_data = None
+  if audio_response.candidates and audio_response.candidates[0].content.parts:
+    audio_part = audio_response.candidates[0].content.parts[0]
+    if hasattr(audio_part, "inline_data") and hasattr(
+        audio_part.inline_data, "data"
+    ):
+      audio_data = audio_part.inline_data.data
+  if audio_data:
+    output_filename = f"{tour.tour_id}_followup_{pfu.id}.wav"
+    out_path = os.path.join(tour.audio_output_dir, output_filename)
+    await asyncio.to_thread(wave_file, out_path, audio_data)
+    print(
+        f"Async: Generated audio for {pfu.question[:50]} at {point.audio_path}"
+    )
+  else:
+    print(f"Async: No audio data generated for {pfu.question[:50]}")
+  
+  pass
+
+
+def create_follow_up_prompt(point: Point, follow_up_question: str, point_info: str, tour_guide_personality: str, user_prefrences: str, index: int):
+  context = f"Tour info: {point_info}\n" 
+
+  if index:
+    context += "Previous Q&A:\n"
+  for follow_up in point.follow_up_questions[:index]:
+    context += f"Q: {follow_up.question}\nA: {follow_up.answer}\n"
+  return f"""
+  You are a helpful tour guide AI with the who embodies the following personality {tour_guide_personality}. Your task is to answer a follow up 
+  question your user asked of you to the best of your ability. I'm going to provide you context of a tour guide explanation about the following
+  point of interest {point.name} which also might include follow-up questions and there answers.
+  I will then provide you with a new follow-up question. I would like you to answer it in a similar way
+  and manarisim of the previous tour guide. Please make sure you answer correctly. You should provide only the response. You can also link back to previous
+  answers / things refrenced in the context if needed in your response. Also, if possible, try to cater your answer to the user prefrences: {user_prefrences}.
+  **Important** you have the google search tool enabled which will allow
+  you to ground your answer. Use it so that your answers are correct as mistakes are not acceptable. You will be fired if you're wrong and the user will be
+  disappointed. On the other hand, if the answer you provide is correct and well thought out you will get a 1 million dollar bonus and the user will be happy!
+
+  Here is the context of the tour guide explanation + some Q&A that might have been: {context}
+  Given the following point of interest: {point.name}
+  Please answer the following question: {follow_up_question}"""
 
 def wave_file(filename, pcm, channels=1, rate=24000, sample_width=2):
   """Saves PCM audio data to a WAV file."""
