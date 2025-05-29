@@ -92,7 +92,7 @@ async def post_tour(request: Request, background_tasks: BackgroundTasks):
         )
 
         # Start background processing
-        background_tasks.add_task(run_background_processing, tour)
+        background_tasks.add_task(run_tour_background_processing, tour)
         with get_db() as db:
             db[tour_id] = tour
 
