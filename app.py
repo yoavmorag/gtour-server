@@ -66,6 +66,14 @@ async def run_tour_background_processing(tour: resources.Tour):
 async def post_tour(request: Request, background_tasks: BackgroundTasks):
     try:
         request_body = await request.json()
+        print(f"Received /tour POST request: {request_body}")  # Log the request body
+
+        tour_name = request_body.get('tour_name', '')
+        # Only use a GUID if tour_name is empty
+        if tour_name:
+            tour_id = tour_name
+        else:
+            tour_id = str(uuid.uuid4())
         tour_name = request_body.get('tour_name', '').replace(" ", "_")
         tour_id = f'{tour_name}_{str(uuid.uuid4())}'
         tour_guide_personality = request_body.get('tour_guide_personality', '')
