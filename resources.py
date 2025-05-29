@@ -135,7 +135,7 @@ class Tour:
         The Point object if found, otherwise None.
     """
     for point in self.points:
-      if point.location == location_name:
+      if point.name == location_name:  # changed from point.location
         return point
     return None
 
@@ -154,7 +154,7 @@ async def _generate_content_for_point_async(
   if not client:
     print(
         "GenAI client not initialized. Skipping content generation for"
-        f" {point.location}"
+        f" {point.name}"  # changed from point.location
     )
     point.info = "Skipped: GenAI client not available."
     point.ready = False
@@ -168,15 +168,15 @@ async def _generate_content_for_point_async(
   else:
     tour_position = "middle"
   previously_visited_places = [
-      p.location for i, p in enumerate(tour.points) if i < index
+      p.name for i, p in enumerate(tour.points) if i < index  # changed from p.location
   ]
   print(
-      f"Async: Generating content for: {point.location} (Position:"
-      f" {tour_position})"
+      f"Async: Generating content for: {point.name} (Position:"
+      f" {tour_position})"  # changed from point.location
   )
   try:
     guide_prompt_text = create_tour_guide_prompt(
-        location=point.location,
+        location=point.name,  # changed from point.location
         tour_position=tour_position,
         previously_visited_places=previously_visited_places,
         user_preferences=tour.user_preferences,
@@ -201,19 +201,19 @@ async def _generate_content_for_point_async(
       generated_text = text_response.candidates[0].content.parts[0].text
     point.info = generated_text.strip()
     print(
-        f"Async: Generated text for {point.location} (first 100 chars):"
-        f" {point.info[:100]}..."
+        f"Async: Generated text for {point.name} (first 100 chars):"
+        f" {point.info[:100]}..."  # changed from point.location
     )
     if not point.info:
       print(
-          f"Async: No text generated for {point.location}. Skipping audio"
-          " generation."
+          f"Async: No text generated for {point.name}. Skipping audio"
+          " generation."  # changed from point.location
       )
-      print(f"couldn't generate text for point: {point.location}")
+      print(f"couldn't generate text for point: {point.name}")  # changed from point.location
       tour.points[index] = point
       return
     chosen_voice_name = "Charon"
-    print(f"Async: Chosen voice for {point.location}: {chosen_voice_name}")
+    print(f"Async: Chosen voice for {point.name}: {chosen_voice_name}")  # changed from point.location
     tts_model = "models/gemini-2.5-flash-preview-tts"
     tts_input_text = (
         "Please narrate the following tour information. Embody a"
@@ -245,19 +245,19 @@ async def _generate_content_for_point_async(
         audio_data = audio_part.inline_data.data
     if audio_data:
       safe_location_name = "".join(
-          c if c.isalnum() else "_" for c in point.location
+          c if c.isalnum() else "_" for c in point.name  # changed from point.location
       )
       output_filename = f"{tour.tour_id}_{safe_location_name}_{index}.wav"
       point.audio_path = os.path.join(tour.audio_output_dir, output_filename)
       await asyncio.to_thread(wave_file, point.audio_path, audio_data)
       print(
-          f"Async: Generated audio for {point.location} at {point.audio_path}"
+          f"Async: Generated audio for {point.name} at {point.audio_path}"  # changed from point.location
       )
     else:
-      print(f"Async: No audio data generated for {point.location}")
+      print(f"Async: No audio data generated for {point.name}")  # changed from point.location
     point.ready = True
   except Exception as e:
-    print(f"Async: Error generating content for point {point.location}: {e}")
+    print(f"Async: Error generating content for point {point.name}: {e}")  # changed from point.location
     point.info = f"Error generating content: {str(e)}"
     point.audio_path = ""
     point.ready = False

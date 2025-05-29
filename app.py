@@ -6,6 +6,8 @@ import json
 import os
 import uuid
 from typing import Any, Dict, List, Optional
+import shelve
+from contextlib import contextmanager
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
@@ -30,23 +32,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory database
-database: Dict[str, Any] = {}
+DB_PATH = "gtour_db"
 
 # Google genai client
 client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"]).aio
 
-@app.get("/")
-async def index():
-    # Serve static index.html (adjust path as needed)
-    return FileResponse("index.html")
+
+@contextmanager
+def get_db():
+    with shelve.open(DB_PATH) as db:
+        yield db
 
 async def process_tour_background(tour):
     tour_id = tour.tour_id
     try:
         print(f"Background processing started for tour_id: {tour_id}")
         await resources.generate_all_points_content_async(client, tour)
-        database[tour_id] = tour
+        with get_db() as db:
+            db[tour_id] = tour
         print(f"Background processing finished and tour saved for tour_id: {tour_id}")
     except Exception as e:
         print(f"Error during background tour processing for tour_id {tour_id}: {e}")
@@ -82,7 +85,8 @@ async def post_tour(request: Request, background_tasks: BackgroundTasks):
 
         # Start background processing
         background_tasks.add_task(run_background_processing, tour)
-        database[tour_id] = tour
+        with get_db() as db:
+            db[tour_id] = tour
 
         resp_points = [point.to_dict() for point in tour.points]
 
@@ -105,7 +109,8 @@ async def post_tour(request: Request, background_tasks: BackgroundTasks):
 @app.get("/tour/{tour_id}")
 async def get_tour(tour_id: str):
     print(f'Tour id: {tour_id}')
-    tour_object = database.get(tour_id)
+    with get_db() as db:
+        tour_object = db.get(tour_id)
     if tour_object is None:
         print(f'Tour with id {tour_id} not found.')
         raise HTTPException(status_code=404, detail=f'Tour with id {tour_id} not found.')
@@ -122,8 +127,10 @@ async def get_tour(tour_id: str):
 @app.get("/tour")
 async def get_all_tours():
     out_data = {}
-    for key, tour in database.items():
-        out_data[tour.tour_id] = tour.to_dict()
+    with get_db() as db:
+        for key in db:
+            tour = db[key]
+            out_data[tour.tour_id] = tour.to_dict()
     return JSONResponse(content=out_data, headers={'Access-Control-Allow-Origin': '*'})
 
 @app.get("/internal_error")
