@@ -21,8 +21,7 @@ class PointNugget:
   def to_dict(self):
     return {
         "id": self.id,
-        "question": self.question,
-        "answer": self.answer,
+        "answer": self.answer[5:],
         "audio_path": self.audio_path,
         "ready": self.ready,
         "played": self.played,
@@ -40,6 +39,7 @@ class Point:
       lng: Union[float, int],
       lat: Union[float, int],
       visited: bool = False,
+      content: Optional[List[PointNugget]] = [],
   ):
     """Initializes a Point object.
 
@@ -56,7 +56,7 @@ class Point:
     self.lng: Union[float, int] = lng
     self.lat: Union[float, int] = lat
     self.visited: bool = visited
-    self.content: Optional[List[PointNugget]] = []
+    self.content: Optional[List[PointNugget]] = content
 
   def add_nugget(self, pn: PointNugget) -> None:
     if not self.content:
@@ -177,7 +177,7 @@ class Tour:
 
 async def _generate_content_for_point_async(
     client: genai.client.AsyncClient, tour: Tour, point: Point, index: int
-):
+) -> Tuple[int, Point]:
   nugget = PointNugget(id = nugget_id(point.name))
   
   if not client:
@@ -187,8 +187,7 @@ async def _generate_content_for_point_async(
     )
     nugget.answer = "error: GenAI client not initialized"
     point.add_nugget(nugget)
-    tour.points[index] = point
-    return
+    return index, point
   
   total_points = len(tour.points)
   if index == 0:
@@ -272,7 +271,7 @@ async def _generate_content_for_point_async(
         audio_data = audio_part.inline_data.data
 
     if audio_data:
-      output_filename = f"{tour.tour_id}_{point.name}_{nugget.id}.wav"
+      output_filename = f"{tour.tour_id}_{nugget.id}.wav"
       nugget.audio_path = os.path.join(tour.audio_output_dir, output_filename)
       await asyncio.to_thread(wave_file, nugget.audio_path, audio_data)
       print(
@@ -290,31 +289,49 @@ async def _generate_content_for_point_async(
     nugget.answer = f"error: {e}"
 
   point.add_nugget(nugget)
-  tour.points[index] = point
-  return
+  return index, point
 
 
 async def generate_all_points_content_async(
-    client: genai.client.AsyncClient, tour: Tour
+    client: genai.client.AsyncClient, tour: Tour, db
 ):
-  if not client:
-    print("GenAI client not initialized. Cannot generate tour content.")
-    return
-  if not tour.points:
-    print("No points in the tour to generate content for.")
-    return
-  print(f"Starting asynchronous content generation for tour: {tour.tour_name}")
-  tasks = []
-  for i, point in enumerate(tour.points):
-    task = asyncio.create_task(
-        _generate_content_for_point_async(client, tour, point, i)
+    """
+    Generates content for all points in a tour asynchronously and updates
+    the database after each point's content is generated.
+    """
+    if not client:
+        print("GenAI client not initialized. Cannot generate tour content.")
+        return
+    if not tour.points:
+        print("No points in the tour to generate content for.")
+        return
+
+    print(f"Starting asynchronous content generation for tour: {tour.tour_name}")
+
+    # Create a list of asyncio tasks for each point
+    tasks = [
+        asyncio.create_task(
+            _generate_content_for_point_async(client, tour, point, i)
+        )
+        for i, point in enumerate(tour.points)
+    ]
+
+# Process tasks as they are completed
+    for i, future in enumerate(asyncio.as_completed(tasks)):
+        # Wait for the next task to complete and get its explicit return value
+        completed_index, completed_point = await future
+        
+        # Now, explicitly update the main tour object with the completed data
+        tour.points[completed_index] = completed_point
+        
+        # Update the database with the guaranteed-to-be-current state of the tour object
+        db[tour.tour_id] = tour
+        print(f"Task {i+1}/{len(tasks)} done. DB updated for tour: {tour.tour_id} with point: '{completed_point.name}'")
+
+    print(
+        "Finished all asynchronous content generation tasks for tour:"
+        f" {tour.tour_name}"
     )
-    tasks.append(task)
-  await asyncio.gather(*tasks)
-  print(
-      "Finished all asynchronous content generation tasks for tour:"
-      f" {tour.tour_name}"
-  )
 
 
 def create_tour_guide_prompt(
@@ -333,8 +350,6 @@ def create_tour_guide_prompt(
   if tour_position.lower() not in valid_positions:
     pass
 
-  tour_position_val = tour_position.lower()
-
   if (
       previously_visited_places
       and isinstance(previously_visited_places, list)
@@ -352,45 +367,69 @@ def create_tour_guide_prompt(
 
   prompt = f"""
 You are an expert tour guide AI. Your task is to generate a transcription of a tour guide's speech for a specific **{location}**.
-**IMPORTANT CONTEXT:** The end-user listening to this tour is **physically present** at the **{{location}}**, having arrived based on its geographical coordinates. Your narration must reflect this immediacy and be grounded in observable reality.
+**IMPORTANT CONTEXT:** The end-user listening to this tour is **physically present** at the **{{location}}**, having arrived based on its geographical coordinates (latitude/longitude). Your narration must reflect this immediacy and be grounded in observable reality.
 
-This location is part of a larger tour, and its position is **{tour_position_val}**. You will also be provided with a list of places visited before the current one. The transcription must include descriptions of *how* the tour guide delivers their lines, formatted as a descriptive phrase followed by a colon before the dialogue.
+This location is part of a larger tour, and its position is **{tour_position}**. You will also be provided with a list of places visited before the current one. The transcription must include descriptions of *how* the tour guide delivers their lines, formatted as a descriptive phrase followed by a colon before the dialogue.
 
 **User Inputs:**
 
 1.  **Location:** {location}
-2.  **Tour Position:** {tour_position_val} (This segment is the '{tour_position_val}' of the overall tour)
+2.  **Tour Position:** {tour_position} (This segment is the '{tour_position}' of the overall tour)
 3.  **User Preferences:** {user_preferences}
 4.  **Tour Guide Personality:** {tour_guide_personality}
 {visited_places_prompt_section}
 
 **Your Task:**
-(Task description as in playground.py - e.g., Utilize Google Search, Embody Personality, Contextualize, Craft Transcription)
+
 1.  **Utilize Google Search for Verifiable Information:** You have access to the Google Search tool. Use it extensively to gather accurate, up-to-date, and comprehensive information about the **{location}**.
     * **Focus on:** Permanent features, historical facts, architectural details, cultural significance, generally expected or characteristic experiences, and typical ambiances of the **{location}**.
-    * **Avoid:** Inventing transient details. Base your descriptions on what a user physically present can generally observe or learn about.
-2.  **Embody the Personality:** Adopt the **{tour_guide_personality}** requested by the user.
+    * **Avoid:** Inventing transient details (e.g., specific items at a market stall that might not always be there *today*, specific current weather conditions, temporary non-historical events, or subjective sensory details not universally perceivable). Base your descriptions on what a user physically present can generally observe or learn about.
+2.  **Embody the Personality:** Adopt the **{tour_guide_personality}** requested by the user in your tone, language, and style of explanation.
 3.  **Contextualize Narration Based on Tour Position and Previous Visits:**
-    * If **Tour Position is 'start'**: Begin narration as the first major stop.
-    * If **Tour Position is 'middle'**: Craft narration transitioning from previous places.
-    * If **Tour Position is 'end'**: Deliver narration as the final stop.
-4.  **Craft a Tour Guide Transcription with Delivery Cues:** Generate a compelling monologue with delivery cues like (With an inviting gesture): Dialogue.
+    * If **Tour Position is 'start'**: Begin your narration as if this is the first major stop. Welcome the travelers to this physical spot.
+    * If **Tour Position is 'middle'**: Craft your narration as if you have already guided them through **Previously Visited Places** (if provided) and are now arriving here, at **{location}**. Ensure smooth, physically grounded transitions (e.g., "Now that we've arrived from '{previously_visited_places[-1] if previously_visited_places else 'our previous stop'}' and are standing here at **{location}**...").
+    * If **Tour Position is 'end'**: Deliver your narration as if this is the final planned stop. Conclude the experience at this physical location.
+4.  **Craft a Tour Guide Transcription with Delivery Cues:** Generate a compelling and informative monologue. The transcription should:
+    * Provide interesting, verifiable facts, stories, and insights about the **{location}**.
+    * Heavily emphasize information that aligns with the user's **{user_preferences}**.
+    * Be engaging and use language appropriate for someone physically present (e.g., "As you see before you...", "Look around at...", "The structure you're now standing in front of...").
+    * Be well-structured and easy to follow.
+    * Highlight unique, observable aspects or lesser-known historical details relevant to the preferences.
+    * **Crucially, precede lines of dialogue with a description of the tour guide's delivery (e.g., tone, pace, emotion, implied action), and incase them in parentheses.** For example: "(With an inviting gesture towards the main entrance):" or "(Voice filled with historical reverence):" or "(Pausing to let you take in the view):".
 
 **Output Format:**
-Provide only the transcription of the tour guide's speech.
-(Output format description as in playground.py)
+
+Provide only the transcription of the tour guide's speech. The narration must seamlessly reflect its specified **{tour_position}**, the user's physical presence, and may subtly reference **Previously Visited Places** for context if appropriate. Do not include any introductory phrases like "Here is the transcription:" or any other meta-commentary.
 
 **Example Scenario (Illustrating Physical Presence, Position, and Previous Visits):**
-(Example as in playground.py)
+
+* **User Input - Location:** "Shuk HaCarmel (Carmel Market), Tel Aviv"
+* **User Input - Tour Position:** "middle"
+* **User Input - Previously Visited Places:** ["Rothschild Boulevard", "Neve Tzedek"]
+* **User Input - User Preferences:** "vibrant atmosphere, local produce, and street food"
+* **User Input - Tour Guide Personality:** "Energetic local foodie"
+
+**Your Expected Output (A snippet):**
+
+Alright, after that lovely stroll through the historic charm of Neve Tzedek, prepare your senses! We're now diving right into the heart of Tel Aviv – Shuk HaCarmel!
+Just listen to the sounds, look at the vibrant colors all around you! This market is an explosion of life, isn't it?
+You'll typically see an amazing array of fresh fruits and vegetables piled high, like those pyramids of fragrant spices that are a staple here, and the mountains of halva. The vendors are often calling out, adding to the unique energy of this place. etc...
 
 **Crucial Considerations:**
-(Crucial considerations as in playground.py - Factual Realism, Immediacy, etc.)
+
+* **Factual and Observable Realism:** The tour MUST describe aspects of the location that are generally true, observable by someone physically present, or historically verifiable. Do NOT invent specific, transient details (e.g., "that specific merchant waving," or "the taste of that particular sample you just tried"). Focus on verifiable characteristics, typical offerings, architecture, history, and general ambiance.
+* **Immediacy for Present User:** Constantly remember the user is **physically at the location**. Use language that acknowledges their direct presence and encourages observation of their actual surroundings.
+* **Subtle Integration of Previous Places:** References should be brief and for context.
+* **Seamless Transitions:** Based on **{tour_position}**.
+* **Accuracy:** Via Google Search for verifiable facts.
+* **Relevance:** To **{user_preferences}**.
+* **Personality Consistency.**
 
 Now, await the user's input.
 """
   return prompt.strip()
 
-async def _generate_follow_up(client: genai.client.AsyncClient, tour: Tour, point: Point, nugget_id: str):
+async def generate_follow_up(client: genai.client.AsyncClient, tour: Tour, point: Point, nugget_id: str):
   index = point.nugget_index(nugget_id)
   if index == -1:
     raise ValueError(f"Follow-up with id {nugget_id} not found")

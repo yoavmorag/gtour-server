@@ -48,17 +48,17 @@ def get_db():
 async def process_tour_background(tour: resources.Tour):
     tour_id = tour.tour_id
     try:
-        print(f"Background processing started for tour_id: {tour_id}")
-        await resources.generate_all_points_content_async(client, tour)
         with get_db() as db:
+            print(f"Background processing started for tour_id: {tour_id}")
+            await resources.generate_all_points_content_async(client, tour, db)
             db[tour_id] = tour
         print(f"Background processing finished and tour saved for tour_id: {tour_id}")
     except Exception as e:
         print(f"Error during background tour processing for tour_id {tour_id}: {e}")
 
-def run_tour_background_processing(tour: resources.Tour):
+async def run_tour_background_processing(tour: resources.Tour):
     try:
-        asyncio.run(process_tour_background(tour))
+        await process_tour_background(tour)
     except Exception as e:
         print(f"Exception in run_background_processing for tour {tour.tour_id}: {e}")
 
@@ -74,6 +74,8 @@ async def post_tour(request: Request, background_tasks: BackgroundTasks):
 
         # Convert the points data to resources.Point objects
         points = [resources.Point(**point) for point in points_data]
+        for p in points:
+            p.name = p.name.replace(" ", "_")
         audio_output_dir = './data'
 
         tour = resources.Tour(
@@ -107,24 +109,7 @@ async def post_tour(request: Request, background_tasks: BackgroundTasks):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'Failed to initiate tour creation: {e}')
-    
-@app.get("/tour")
-async def get_tour(tour_id: str):
-    print(f'Tour id: {tour_id}')
-    with get_db() as db:
-        tour_object = db.get(tour_id)
-    if tour_object is None:
-        print(f'Tour with id {tour_id} not found.')
-        raise HTTPException(status_code=404, detail=f'Tour with id {tour_id} not found.')
-    tour_data = {
-        'tour_id': tour_object.tour_id,
-        'tour_name': tour_object.tour_name,
-        'tour_guide_personality': tour_object.tour_guide_personality,
-        'user_preferences': tour_object.user_preferences,
-        'points': [point.to_dict() for point in tour_object.points],
-    }
-    print(f'Tour data: {tour_data}')
-    return JSONResponse(content=tour_data, headers={'Access-Control-Allow-Origin': '*'})
+
 
 @app.get("/tour/{tour_id}")
 async def get_tour(tour_id: str):
@@ -144,16 +129,16 @@ async def get_tour(tour_id: str):
     print(f'Tour data: {tour_data}')
     return JSONResponse(content=tour_data, headers={'Access-Control-Allow-Origin': '*'})
 
-def run_nugget_background_processing(tour: resources.Tour, point: resources.Point, nugget_id: str):
+async def run_nugget_background_processing(client: genai.client.AsyncClient, tour: resources.Tour, point: resources.Point, nugget_id: str):
     try:
-        asyncio.run(process_nugget_background(client, tour, point, nugget_id))
+        await process_nugget_background(client, tour, point, nugget_id)
     except Exception as e:
-        print(f"Exception in run_background_processing for tour {tour.tour_id}: {e}")
+        print(f"Exception in run_background_processing for nugget {tour.tour_id}: {e}")
 
-async def process_nugget_background(tour: resources.Tour, point: resources.Point, nugget_id: str):
+async def process_nugget_background(client: genai.client.AsyncClient, tour: resources.Tour, point: resources.Point, nugget_id: str):
     with get_db() as db:
         try:
-            await resources._generate_follow_up(client, tour, point, nugget_id)
+            await resources.generate_follow_up(client, tour, point, nugget_id)
         except Exception as e:
             print(f"Exception in process_nugget_background for nugget {nugget_id}: {e}")
         db[tour.tour_id] = tour
@@ -206,7 +191,8 @@ async def post_point_nugget(
 
     background_tasks.add_task(
         run_nugget_background_processing,
-        tour_id,
+        client,
+        tour,
         found_point,
         nugget_id
     ) #
