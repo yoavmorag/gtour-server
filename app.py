@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from google import  genai
+from google import genai
 
 import resources
 
@@ -66,7 +66,7 @@ def run_tour_background_processing(tour: resources.Tour):
 async def post_tour(request: Request, background_tasks: BackgroundTasks):
     try:
         request_body = await request.json()
-        tour_name = request_body.get('tour_name', '')
+        tour_name = request_body.get('tour_name', '').replace(" ", "_")
         tour_id = f'{tour_name}_{str(uuid.uuid4())}'
         tour_guide_personality = request_body.get('tour_guide_personality', '')
         user_preferences = request_body.get('user_preferences', '')
@@ -86,7 +86,7 @@ async def post_tour(request: Request, background_tasks: BackgroundTasks):
         )
 
         # Start background processing
-        background_tasks.add_task(run_background_processing, tour)
+        background_tasks.add_task(run_tour_background_processing, tour)
         with get_db() as db:
             db[tour_id] = tour
 
@@ -107,6 +107,24 @@ async def post_tour(request: Request, background_tasks: BackgroundTasks):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f'Failed to initiate tour creation: {e}')
+    
+@app.get("/tour")
+async def get_tour(tour_id: str):
+    print(f'Tour id: {tour_id}')
+    with get_db() as db:
+        tour_object = db.get(tour_id)
+    if tour_object is None:
+        print(f'Tour with id {tour_id} not found.')
+        raise HTTPException(status_code=404, detail=f'Tour with id {tour_id} not found.')
+    tour_data = {
+        'tour_id': tour_object.tour_id,
+        'tour_name': tour_object.tour_name,
+        'tour_guide_personality': tour_object.tour_guide_personality,
+        'user_preferences': tour_object.user_preferences,
+        'points': [point.to_dict() for point in tour_object.points],
+    }
+    print(f'Tour data: {tour_data}')
+    return JSONResponse(content=tour_data, headers={'Access-Control-Allow-Origin': '*'})
 
 @app.get("/tour/{tour_id}")
 async def get_tour(tour_id: str):
@@ -126,14 +144,23 @@ async def get_tour(tour_id: str):
     print(f'Tour data: {tour_data}')
     return JSONResponse(content=tour_data, headers={'Access-Control-Allow-Origin': '*'})
 
-def run_followup_background_processing(tour: resources.Tour, point: resources.Point, followup_id: str):
+def run_nugget_background_processing(tour: resources.Tour, point: resources.Point, nugget_id: str):
     try:
-        asyncio.run(resources._generate_follow_up(client, tour, point, followup_id))
+        asyncio.run(process_nugget_background(client, tour, point, nugget_id))
     except Exception as e:
         print(f"Exception in run_background_processing for tour {tour.tour_id}: {e}")
 
+async def process_nugget_background(tour: resources.Tour, point: resources.Point, nugget_id: str):
+    with get_db() as db:
+        try:
+            await resources._generate_follow_up(client, tour, point, nugget_id)
+        except Exception as e:
+            print(f"Exception in process_nugget_background for nugget {nugget_id}: {e}")
+        db[tour.tour_id] = tour
+
+
 @app.post("/tour/{tour_id}/point/{point_name}") # Changed to app.post
-async def post_point_question(
+async def post_point_nugget(
     tour_id: str,
     point_name: str,
     request: Request,
@@ -143,7 +170,8 @@ async def post_point_question(
     Retrieves details for a specific point within a tour,
     accepts a user's question, and initiates background processing.
     """
-    tour = database.get(tour_id) #
+    with get_db() as db:
+        tour : resources.Tour = db.get(tour_id) #
     if not tour:
         raise HTTPException(status_code=404, detail=f"Tour with ID '{tour_id}' not found")
 
@@ -158,32 +186,64 @@ async def post_point_question(
 
     if not found_point:
         raise HTTPException(status_code=404, detail=f"Point with name '{point_name}' not found in tour '{tour_id}'")
-
+    
+    first_n = found_point.content[0] if len(found_point.content) > 0 else None
+    if not first_n or first_n.ready == False:
+        return JSONResponse(
+            status_code=400,
+            content={"message": "Initial point content is not ready yet."},
+            headers={'Access-Control-Allow-Origin': '*'},
+        )
+        
     request_body = await request.json()
     question: str = request_body.get('question', '')
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty")
     
-    followup_id = str(uuid.uuid4())
-    found_point.add_follow_up(id=followup_id, question=question)
-
+    nugget_id = resources.nugget_id(point_name)
+    nugget = resources.PointNugget(id=nugget_id, question=question)
+    found_point.add_nugget(nugget)
 
     background_tasks.add_task(
-        run_followup_background_processing,
+        run_nugget_background_processing,
         tour_id,
         found_point,
-        followup_id
+        nugget_id
     ) #
     print(f"Enqueued background task for point '{point_name}' in tour '{tour_id}' with question: '{question[:50]}...'")
 
     # The response can be the point details, or a confirmation message,
     # or a combination. Here, we return the point details along with the question received.
-    return {
-        "point_details": found_point,
-        "question_received": question,
-        "followup_id": followup_id,
-        "message": "Question received and background processing initiated."
-    }
+    return JSONResponse(
+            status_code=202,
+            content={
+                "nugget": nugget.to_dict(),
+                "nugget_id": nugget_id,
+            },
+            headers={'Access-Control-Allow-Origin': '*'},
+        )
+
+@app.get("/tour/{tour_id}/point/{point_name}/nugget/{nugget_id}")
+async def get_nugget_audio(tour_id: str, point_name: str, nugget_id: str):
+    with get_db() as db:
+        tour_object :resources.Tour = db.get(tour_id)
+    if tour_object is None:
+        print(f'Tour with id {tour_id} not found.')
+        raise HTTPException(status_code=404, detail=f'Tour with id {tour_id} not found.')
+    point : resources.Point = None
+    for p in tour_object.points:
+        if p.name == point_name:
+            point = p
+            break
+    if not point:
+        print(f'Point with name {point_name} not found.')
+        raise HTTPException(status_code=404, detail=f'Point with id {point_name} not found.')
+    ni = point.nugget_index(nugget_id)
+    if ni == -1:
+        print(f'Nugget with id {nugget_id} not found.')
+        raise HTTPException(status_code=404, detail=f'Nugget with id {nugget_id} not found.')
+    nugget = point.content[ni]
+    return JSONResponse(status_code=200, content={"nugget": nugget.to_dict()},  headers={'Access-Control-Allow-Origin': '*'})
 
 @app.get("/tour")
 async def get_all_tours():

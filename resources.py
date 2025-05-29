@@ -8,15 +8,29 @@ from google.genai import types
 import uuid
 
 
-class PointFollowUp:
+class PointNugget:
   """Represents a follow-up question and answer for a point of interest."""
-  def __init__(self):
-    self,
-    self.id: str = ""
-    self.question: str = ""
-    self.answer: str = ""
-    self.audio_path: str = ""
+  def __init__(self, id: str = "", question: str = "", answer: str = "", audio_path: str = "", ready: bool = False, played: bool = False):
+    self.id = id
+    self.question = question
+    self.answer = answer
+    self.audio_path = audio_path
+    self.ready = ready
+    self.played = played  
+  
+  def to_dict(self):
+    return {
+        "id": self.id,
+        "question": self.question,
+        "answer": self.answer,
+        "audio_path": self.audio_path,
+        "ready": self.ready,
+        "played": self.played,
+    }
 
+def nugget_id(point_name:str) -> str:
+  return f"{point_name}_nugget_{str(uuid.uuid4())}"
+  
 class Point:
   """Represents a geographical point of interest with associated information."""
 
@@ -26,9 +40,6 @@ class Point:
       lng: Union[float, int],
       lat: Union[float, int],
       visited: bool = False,
-      ready: bool = False,
-      info: str = "",
-      audio_path: str = "",
   ):
     """Initializes a Point object.
 
@@ -45,21 +56,16 @@ class Point:
     self.lng: Union[float, int] = lng
     self.lat: Union[float, int] = lat
     self.visited: bool = visited
-    self.ready: bool = ready
-    self.audio_path: str = audio_path
-    self.info: str = info
-    # TODO: Add lock handling
-    self.follow_up_questions: Optional[List[PointFollowUp]] = []
+    self.content: Optional[List[PointNugget]] = []
 
-  def add_follow_up(self, id: str, question: str) -> None:
-    if not self.follow_up_questions:
-      self.follow_up_questions = []
-    follow_up = PointFollowUp(id = id, question = question)
-    self.follow_up_questions.append(follow_up)
+  def add_nugget(self, pn: PointNugget) -> None:
+    if not self.content:
+      self.content = []
+    self.content.append(pn)
 
-  def followup_index(self, id: str) -> int:
-    for i, follow_up in enumerate(self.follow_up_questions):
-      if follow_up.id == id:
+  def nugget_index(self, id: str) -> int:
+    for i, nugget in enumerate(self.content or []):
+      if nugget.id == id:
         return i
     return -1
     
@@ -69,9 +75,7 @@ class Point:
             "lng": self.lng,
             "lat": self.lat,
             "visited": self.visited,
-            "ready": self.ready,
-            "audio_path": self.audio_path,
-            "info": self.info,
+            "content": [nugget.to_dict() for nugget in self.content] if self.content else [],
         }
 
   def __repr__(self) -> str:
@@ -148,7 +152,7 @@ class Tour:
     else:
       raise TypeError("Only Point objects can be added to a Tour.")
 
-  def get_point_by_location(self, location_name: str) -> Union[Point, None]:
+  def get_point_by_name(self, name: str) -> Union[Point, None]:
     """Retrieves a point from the tour by its location name.
 
     Args:
@@ -158,7 +162,7 @@ class Tour:
         The Point object if found, otherwise None.
     """
     for point in self.points:
-      if point.name == location_name:  # changed from point.location
+      if point.name == name: 
         return point
     return None
 
@@ -174,15 +178,18 @@ class Tour:
 async def _generate_content_for_point_async(
     client: genai.client.AsyncClient, tour: Tour, point: Point, index: int
 ):
+  nugget = PointNugget(id = nugget_id(point.name))
+  
   if not client:
     print(
         "GenAI client not initialized. Skipping content generation for"
-        f" {point.name}"  # changed from point.location
+        f" {nugget.id}"
     )
-    point.info = "Skipped: GenAI client not available."
-    point.ready = False
+    nugget.answer = "error: GenAI client not initialized"
+    point.add_nugget(nugget)
     tour.points[index] = point
     return
+  
   total_points = len(tour.points)
   if index == 0:
     tour_position = "start"
@@ -193,13 +200,9 @@ async def _generate_content_for_point_async(
   previously_visited_places = [
       p.name for i, p in enumerate(tour.points) if i < index  # changed from p.location
   ]
-  print(
-      f"Async: Generating content for: {point.name} (Position:"
-      f" {tour_position})"  # changed from point.location
-  )
   try:
     guide_prompt_text = create_tour_guide_prompt(
-        location=point.name,  # changed from point.location
+        location=point.name,
         tour_position=tour_position,
         previously_visited_places=previously_visited_places,
         user_preferences=tour.user_preferences,
@@ -222,26 +225,27 @@ async def _generate_content_for_point_async(
     generated_text = ""
     if text_response.candidates and text_response.candidates[0].content.parts:
       generated_text = text_response.candidates[0].content.parts[0].text
-    point.info = generated_text.strip()
-    print(
-        f"Async: Generated text for {point.name} (first 100 chars):"
-        f" {point.info[:100]}..."  # changed from point.location
-    )
-    if not point.info:
-      print(
-          f"Async: No text generated for {point.name}. Skipping audio"
-          " generation."  # changed from point.location
+    generated_text = generated_text.strip()
+    if not generated_text:
+      print(f"Async: No text generated for {nugget.id}. Skipping audio generation.")
+      raise Exception(
+          "No text generated error"
       )
-      print(f"couldn't generate text for point: {point.name}")  # changed from point.location
-      tour.points[index] = point
-      return
+    
+    nugget.question =guide_prompt_text
+    nugget.answer =  generated_text
+    print(
+        f"Async: Generated text for {point.name} nugget {nugget.id} (first 100 chars):"
+        f" {nugget.answer[:100]}..." 
+    )
+
     chosen_voice_name = "Charon"
-    print(f"Async: Chosen voice for {point.name}: {chosen_voice_name}")  # changed from point.location
+    print(f"Async: Chosen voice for {nugget.id}: {chosen_voice_name}")
     tts_model = "models/gemini-2.5-flash-preview-tts"
     tts_input_text = (
         "Please narrate the following tour information. Embody a"
         f" {tour.tour_guide_personality} style. Speak clearly and at a"
-        f" moderate pace: {point.info}"
+        f" moderate pace: {nugget.answer}"
     )
     audio_response = await client.models.generate_content(
         model=tts_model,
@@ -266,24 +270,26 @@ async def _generate_content_for_point_async(
           audio_part.inline_data, "data"
       ):
         audio_data = audio_part.inline_data.data
+
     if audio_data:
-      safe_location_name = "".join(
-          c if c.isalnum() else "_" for c in point.name  # changed from point.location
-      )
-      output_filename = f"{tour.tour_id}_{safe_location_name}_{index}.wav"
-      point.audio_path = os.path.join(tour.audio_output_dir, output_filename)
-      await asyncio.to_thread(wave_file, point.audio_path, audio_data)
+      output_filename = f"{tour.tour_id}_{point.name}_{nugget.id}.wav"
+      nugget.audio_path = os.path.join(tour.audio_output_dir, output_filename)
+      await asyncio.to_thread(wave_file, nugget.audio_path, audio_data)
       print(
-          f"Async: Generated audio for {point.name} at {point.audio_path}"  # changed from point.location
+          f"Async: Generated audio for {nugget.id} at {nugget.audio_path}"  
       )
     else:
-      print(f"Async: No audio data generated for {point.name}")  # changed from point.location
-    point.ready = True
+      print(f"Async: No audio data generated for {point.name}")
+      raise Exception(
+          "No audio data generated error"
+      )
+    nugget.ready = True
+
   except Exception as e:
-    print(f"Async: Error generating content for point {point.name}: {e}")  # changed from point.location
-    point.info = f"Error generating content: {str(e)}"
-    point.audio_path = ""
-    point.ready = False
+    print(f"Async: Error generating content for point {nugget.id}: {e}")
+    nugget.answer = f"error: {e}"
+
+  point.add_nugget(nugget)
   tour.points[index] = point
   return
 
@@ -300,9 +306,6 @@ async def generate_all_points_content_async(
   print(f"Starting asynchronous content generation for tour: {tour.tour_name}")
   tasks = []
   for i, point in enumerate(tour.points):
-    point.ready = False
-    point.info = "Processing..."
-    point.audio_path = ""
     task = asyncio.create_task(
         _generate_content_for_point_async(client, tour, point, i)
     )
@@ -387,12 +390,12 @@ Now, await the user's input.
 """
   return prompt.strip()
 
-async def _generate_follow_up(client: genai.client.AsyncClient, tour: Tour, point: Point, followup_id: str):
-  index = point.followup_index(followup_id)
+async def _generate_follow_up(client: genai.client.AsyncClient, tour: Tour, point: Point, nugget_id: str):
+  index = point.nugget_index(nugget_id)
   if index == -1:
-    raise ValueError(f"Follow-up with id {followup_id} not found")
-  pfu = point.follow_up_questions[index]
-  prompt = create_follow_up_prompt(point=point, follow_up_question=pfu.follow_up_question, point_info=point.info, tour_guide_personality=tour.tour_guide_personality, user_prefrences=tour.user_preferences)
+    raise ValueError(f"Follow-up with id {nugget_id} not found")
+  nugget = point.content[index]
+  prompt = create_follow_up_prompt(point=point, nugget=nugget, index= index, tour_guide_personality=tour.tour_guide_personality, user_prefrences=tour.user_preferences)
   text_gen_config = types.GenerateContentConfig(
         temperature=1.5,
         tools=[types.Tool(google_search=types.GoogleSearch())],
@@ -410,7 +413,7 @@ async def _generate_follow_up(client: genai.client.AsyncClient, tour: Tour, poin
   answer = ""
   if text_response.candidates and text_response.candidates[0].content.parts:
     answer = text_response.candidates[0].content.parts[0].text
-  pfu.answer = answer
+  nugget.answer = answer
 
   chosen_voice_name = "Charon"
   tts_model = "models/gemini-2.5-flash-preview-tts"
@@ -444,39 +447,55 @@ async def _generate_follow_up(client: genai.client.AsyncClient, tour: Tour, poin
     ):
       audio_data = audio_part.inline_data.data
   if audio_data:
-    output_filename = f"{tour.tour_id}_followup_{pfu.id}.wav"
+    output_filename = f"{tour.tour_id}_followup_{nugget.id}.wav"
     out_path = os.path.join(tour.audio_output_dir, output_filename)
     await asyncio.to_thread(wave_file, out_path, audio_data)
+    nugget.audio_path = out_path
+    nugget.ready = True
     print(
-        f"Async: Generated audio for {pfu.question[:50]} at {point.audio_path}"
+        f"Async: Generated audio for {nugget.question[:50]} at {point.audio_path}"
     )
   else:
-    print(f"Async: No audio data generated for {pfu.question[:50]}")
+    print(f"Async: No audio data generated for {nugget.question[:50]}")
   
-  pass
 
 
-def create_follow_up_prompt(point: Point, follow_up_question: str, point_info: str, tour_guide_personality: str, user_prefrences: str, index: int):
-  context = f"Tour info: {point_info}\n" 
+def create_follow_up_prompt(point: Point, nugget: PointNugget, index: int, tour_guide_personality: str, user_prefrences: str):
+  context = f"Initial Tour Prompt: {point.content[0].question if point.content else ''}\n Generated Tour: {point.content[0].answer if point.content else ''}"
 
-  if index:
+  if index > 1:
     context += "Previous Q&A:\n"
-  for follow_up in point.follow_up_questions[:index]:
+  for follow_up in point.content[1:index]:
     context += f"Q: {follow_up.question}\nA: {follow_up.answer}\n"
   return f"""
   You are a helpful tour guide AI with the who embodies the following personality {tour_guide_personality}. Your task is to answer a follow up 
-  question your user asked of you to the best of your ability. I'm going to provide you context of a tour guide explanation about the following
+  question your user asked of you to the best of your ability. I'm going to provide you context of a prompt given to a **different**
+  tour guide AI and his generated tour response explaining about the following
   point of interest {point.name} which also might include follow-up questions and there answers.
-  I will then provide you with a new follow-up question. I would like you to answer it in a similar way
+  I will then provide you with a new follow-up question.
+
+  The input format will be:
+  Initial tour prompt: some prompt explaining the previous AI Tour guides instructions.
+  Generated tour: some tour guide response.
+  Optional: Previous Q&A: Q: Some questions and answers
+
+  Given the following point of interest: The specified location the tour is about.
+  Please answer the following question: The new question
+
+  Then you should provide the answer.
+    
+  I would like you to answer it in a similar way
   and manarisim of the previous tour guide. Please make sure you answer correctly. You should provide only the response. You can also link back to previous
-  answers / things refrenced in the context if needed in your response. Also, if possible, try to cater your answer to the user prefrences: {user_prefrences}.
+  answers, questions or things refrenced in the context if needed in your response. Also, if possible, try to cater your answer to the user prefrences: {user_prefrences}.
   **Important** you have the google search tool enabled which will allow
   you to ground your answer. Use it so that your answers are correct as mistakes are not acceptable. You will be fired if you're wrong and the user will be
   disappointed. On the other hand, if the answer you provide is correct and well thought out you will get a 1 million dollar bonus and the user will be happy!
 
-  Here is the context of the tour guide explanation + some Q&A that might have been: {context}
+  I will now provide the input:
+
+  {context}
   Given the following point of interest: {point.name}
-  Please answer the following question: {follow_up_question}"""
+  Please answer the following question: {nugget.question}"""
 
 def wave_file(filename, pcm, channels=1, rate=24000, sample_width=2):
   """Saves PCM audio data to a WAV file."""
